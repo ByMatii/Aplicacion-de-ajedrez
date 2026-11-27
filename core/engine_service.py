@@ -1,6 +1,7 @@
 """Stockfish over UCI, running in its own QThread so the UI never blocks."""
 import glob
 import os
+import random
 import shutil
 
 import chess
@@ -9,14 +10,26 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 Limit = chess.engine.Limit
 
+# (engine options, search limit, chance of a random legal move).
 # Every level sets all strength options so switching levels never inherits the previous one.
-# Stockfish's UCI_Elo floor is ~1320, so the beginner level uses Skill Level 0 + tiny depth instead.
+# Stockfish's UCI_Elo floor is 1320, so lower levels use Skill Level 0 + depth 1 + random moves
+# (a beginner who sometimes ignores the position). Elo labels come from tools/calibrate.py.
+WEAK = {"Skill Level": 0, "UCI_LimitStrength": False}
 LEVELS = {
-    "Principiante (~800)": ({"Skill Level": 0, "UCI_LimitStrength": False}, Limit(depth=1)),
-    "Intermedio (~1400)": ({"Skill Level": 20, "UCI_LimitStrength": True, "UCI_Elo": 1400}, Limit(time=0.3)),
-    "Avanzado (~2000)": ({"Skill Level": 20, "UCI_LimitStrength": True, "UCI_Elo": 2000}, Limit(time=0.5)),
-    "Maestro (sin límite)": ({"Skill Level": 20, "UCI_LimitStrength": False}, Limit(time=1.0)),
+    "Iniciación (~400)": (WEAK, Limit(depth=1), 0.5),
+    "Principiante (~800)": (WEAK, Limit(depth=1), 0.2),
+    "Intermedio (~1400)": ({"Skill Level": 20, "UCI_LimitStrength": True, "UCI_Elo": 1400}, Limit(time=0.3), 0),
+    "Avanzado (~2000)": ({"Skill Level": 20, "UCI_LimitStrength": True, "UCI_Elo": 2000}, Limit(time=0.5), 0),
+    "Maestro (sin límite)": ({"Skill Level": 20, "UCI_LimitStrength": False}, Limit(time=1.0), 0),
 }
+
+
+def bot_move(engine: chess.engine.SimpleEngine, board: chess.Board, level: str) -> chess.Move:
+    options, limit, random_rate = LEVELS[level]
+    if random.random() < random_rate:
+        return random.choice(list(board.legal_moves))
+    engine.configure(options)
+    return engine.play(board, limit).move
 ANALYSIS_LIMIT = Limit(time=0.25)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -66,11 +79,8 @@ class EngineWorker(QObject):
     def play(self, fen: str, level: str):
         if not self.bot:
             return
-        options, limit = LEVELS[level]
         try:
-            self.bot.configure(options)
-            result = self.bot.play(chess.Board(fen), limit)
-            self.bot_moved.emit(fen, result.move)
+            self.bot_moved.emit(fen, bot_move(self.bot, chess.Board(fen), level))
         except chess.engine.EngineError as e:
             self.failed.emit(f"Error del motor al jugar: {e}")
         except chess.engine.EngineTerminatedError:

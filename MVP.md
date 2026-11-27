@@ -6,7 +6,7 @@ Objetivo: la versión más pequeña que ya **se juega** y ya **enseña algo** en
 
 | Área | Qué hace | Dónde |
 |---|---|---|
-| Jugar contra bot | 4 niveles (Principiante ~800, Intermedio ~1400, Avanzado ~2000, Maestro). Elegir color. | `core/engine_service.py` |
+| Jugar contra bot | 5 niveles (Iniciación ~400, Principiante ~800, Intermedio ~1400, Avanzado ~2000, Maestro). Elegir color. Los niveles <1320 añaden jugadas al azar; calibrados con `tools/calibrate.py`. | `core/engine_service.py` |
 | Reglas | Movimientos legales, jaque, mate, tablas, ahogado, coronación (a dama). | `python-chess` directo |
 | Barra de ventaja | Evaluación en vivo (`+1.8`, `#4`) en un hilo aparte. | `ui/eval_bar_widget.py` |
 | Clasificación de jugadas | Mejor jugada / Buena / Imprecisión (0.5–1.0) / Error (1.0–2.5) / Error grave (>2.5), con la mejor alternativa. | `core/evaluator.py` |
