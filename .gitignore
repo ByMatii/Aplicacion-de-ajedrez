@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+assets/engines/*
+!assets/engines/.gitkeep
