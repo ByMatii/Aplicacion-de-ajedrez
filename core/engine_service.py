@@ -22,6 +22,9 @@ LEVELS = {
     "Avanzado (~2000)": ({"Skill Level": 20, "UCI_LimitStrength": True, "UCI_Elo": 2000}, Limit(time=0.5), 0),
     "Maestro (sin límite)": ({"Skill Level": 20, "UCI_LimitStrength": False}, Limit(time=1.0), 0),
 }
+ANALYSIS_LIMIT = Limit(time=0.25)
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def bot_move(engine: chess.engine.SimpleEngine, board: chess.Board, level: str) -> chess.Move:
@@ -30,9 +33,6 @@ def bot_move(engine: chess.engine.SimpleEngine, board: chess.Board, level: str) 
         return random.choice(list(board.legal_moves))
     engine.configure(options)
     return engine.play(board, limit).move
-ANALYSIS_LIMIT = Limit(time=0.25)
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def find_stockfish() -> str | None:
@@ -47,58 +47,88 @@ def find_stockfish() -> str | None:
 class EngineWorker(QObject):
     analysed = Signal(str, object, object)  # fen, PovScore, best move (or None)
     bot_moved = Signal(str, object)  # fen it played from, move
-    failed = Signal(str)
+    failed = Signal(str)  # unrecoverable: the UI should tell the user
+    restarted = Signal()  # Stockfish had died and is running again
 
     def __init__(self, path: str):
         super().__init__()
         self.path = path
         self.analyst = self.bot = None  # two processes: analysis must stay full strength
 
-    @Slot()
-    def start(self):
+    def _launch(self) -> bool:
+        """(Re)start both Stockfish processes. Emits `failed` and returns False if it can't."""
+        self.close()
         try:
             self.analyst = chess.engine.SimpleEngine.popen_uci(self.path)
             self.bot = chess.engine.SimpleEngine.popen_uci(self.path)
+            return True
         except Exception as e:
+            self.close()  # don't leave the first process running if the second one failed
             self.failed.emit(f"No se pudo iniciar Stockfish ({self.path}): {e}")
+            return False
+
+    def _guarded(self, action, what: str):
+        """Run action(). If Stockfish died, restart it and retry once; None means it failed."""
+        for attempt in (1, 2):
+            try:
+                return action()
+            # EngineTerminatedError is a subclass of EngineError: it has to be caught first
+            except chess.engine.EngineTerminatedError:
+                if attempt == 2:
+                    self.failed.emit(f"Stockfish se cerró inesperadamente al {what}.")
+                    return None
+                if not self._launch():  # _launch already reported the failure
+                    return None
+                self.restarted.emit()
+            except chess.engine.EngineError as e:
+                self.failed.emit(f"Error del motor al {what}: {e}")
+                return None
+        return None
+
+    @Slot()
+    def start(self):
+        self._launch()
+
+    @Slot()
+    def restart(self):
+        if self._launch():
+            self.restarted.emit()
 
     @Slot(str)
     def analyse(self, fen: str):
         if not self.analyst:
             return
-        try:
-            info = self.analyst.analyse(chess.Board(fen), ANALYSIS_LIMIT)
+        info = self._guarded(lambda: self.analyst.analyse(chess.Board(fen), ANALYSIS_LIMIT), "analizar")
+        if info is not None:
             pv = info.get("pv") or [None]
             self.analysed.emit(fen, info["score"], pv[0])
-        except chess.engine.EngineError as e:
-            self.failed.emit(f"Error del motor al analizar: {e}")
-        except chess.engine.EngineTerminatedError:
-            self.failed.emit("Stockfish se cerró inesperadamente.")
 
     @Slot(str, str)
     def play(self, fen: str, level: str):
         if not self.bot:
             return
-        try:
-            self.bot_moved.emit(fen, bot_move(self.bot, chess.Board(fen), level))
-        except chess.engine.EngineError as e:
-            self.failed.emit(f"Error del motor al jugar: {e}")
-        except chess.engine.EngineTerminatedError:
-            self.failed.emit("Stockfish se cerró inesperadamente.")
+        move = self._guarded(lambda: bot_move(self.bot, chess.Board(fen), level), "jugar")
+        if move is not None:
+            self.bot_moved.emit(fen, move)
 
     def close(self):
         for engine in (self.analyst, self.bot):
             if engine:
                 try:
                     engine.quit()
-                except chess.engine.EngineTerminatedError:
-                    pass
+                except (chess.engine.EngineError, OSError):
+                    try:
+                        engine.close()  # already dead or stuck: make sure the process is gone
+                    except Exception:
+                        pass
+        self.analyst = self.bot = None
 
 
 class EngineService(QObject):
     """Owns the worker thread. Emit request_* from the UI; listen on .worker signals."""
     request_analysis = Signal(str)
     request_move = Signal(str, str)
+    request_restart = Signal()
 
     def __init__(self, path: str):
         super().__init__()
@@ -108,6 +138,7 @@ class EngineService(QObject):
         self._thread.started.connect(self.worker.start)
         self.request_analysis.connect(self.worker.analyse)
         self.request_move.connect(self.worker.play)
+        self.request_restart.connect(self.worker.restart)
         self._thread.start()
 
     def shutdown(self):

@@ -4,11 +4,12 @@ import math
 import chess
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 LIGHT, DARK = QColor("#f0d9b5"), QColor("#b58863")
 SELECTED, LAST_MOVE = QColor(246, 246, 105, 170), QColor(205, 210, 106, 140)
 ARROW = QColor(40, 160, 70, 200)
+PROMOTION_CHOICES = (("Dama", chess.QUEEN), ("Torre", chess.ROOK), ("Alfil", chess.BISHOP), ("Caballo", chess.KNIGHT))
 
 
 class BoardWidget(QWidget):
@@ -41,6 +42,22 @@ class BoardWidget(QWidget):
         return chess.square(7 - col, row) if self.flipped else chess.square(col, 7 - row)
 
     # input ------------------------------------------------------------------
+    def _ask_promotion(self, global_pos) -> int | None:
+        """Pop-up menu with the four pieces; None if the user dismisses it."""
+        menu = QMenu(self)
+        actions = {menu.addAction(name): piece_type for name, piece_type in PROMOTION_CHOICES}
+        return actions.get(menu.exec(global_pos))
+
+    def _move_from_click(self, from_sq: int, to_sq: int, global_pos) -> chess.Move | None:
+        """Legal move from_sq -> to_sq, asking for the promotion piece when a pawn reaches the last rank."""
+        move = chess.Move(from_sq, to_sq)
+        if move in self.board.legal_moves:
+            return move
+        if chess.Move(from_sq, to_sq, chess.QUEEN) not in self.board.legal_moves:
+            return None  # not a promotion either: illegal
+        piece_type = self._ask_promotion(global_pos)
+        return chess.Move(from_sq, to_sq, piece_type) if piece_type else None
+
     def mousePressEvent(self, event):
         if not self.interactive:
             return
@@ -48,11 +65,8 @@ class BoardWidget(QWidget):
         if sq is None:
             return
         if self.selected is not None and sq != self.selected:
-            move = chess.Move(self.selected, sq)
-            piece = self.board.piece_at(self.selected)
-            if piece and piece.piece_type == chess.PAWN and chess.square_rank(sq) in (0, 7):
-                move.promotion = chess.QUEEN  # shortcut: always queens, add a picker when underpromotion matters
-            if move in self.board.legal_moves:
+            move = self._move_from_click(self.selected, sq, event.globalPosition().toPoint())
+            if move:
                 self.selected = None
                 self.move_made.emit(move)
                 return

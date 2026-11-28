@@ -1,4 +1,6 @@
 """Turns engine scores into numbers for the eval bar and labels for the coach."""
+import math
+
 import chess.engine
 
 BEST, GOOD, INACCURACY, MISTAKE, BLUNDER = "Mejor jugada", "Buena", "Imprecisión", "Error", "Error grave"
@@ -37,3 +39,12 @@ def classify(cp_before: int, cp_after: int, white_moved: bool, is_best: bool) ->
     if loss >= 50:
         return INACCURACY, loss
     return GOOD, loss
+
+
+def move_accuracy(cp_before: int, cp_after: int, white_moved: bool) -> float:
+    """Accuracy 0..100 of one move: Lichess-style curve over the mover's win-probability drop."""
+    drop = 100 * (white_share(cp_before) - white_share(cp_after))
+    if not white_moved:
+        drop = -drop
+    drop = max(0.0, drop)
+    return max(0.0, min(100.0, 103.1668 * math.exp(-0.04354 * drop) - 3.1669))

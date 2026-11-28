@@ -1,13 +1,7 @@
-"""Run: python tests/test_mvp.py  (no Stockfish needed; engine results are faked)."""
-import os
-import sys
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+"""Evaluator labels + one end-to-end case of the game loop (engine results are faked)."""
 import chess
 from chess.engine import Cp, Mate, PovScore
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QMessageBox
 
 from core.evaluator import BEST, BLUNDER, GOOD, INACCURACY, MISTAKE, classify, cp_white, format_score
 
@@ -24,11 +18,12 @@ def test_evaluator():
     assert format_score(PovScore(Mate(4), chess.WHITE)) == "#4"
 
 
-def test_game_loop_pauses_on_blunder_and_undo_retries():
+def test_game_loop_pauses_on_blunder_and_undo_retries(qapp, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)  # the missing engine reports a failure
     from ui.main_window import MainWindow
     w = MainWindow("missing-engine")
-    w.engine.request_move.disconnect()  # keep the fake from reaching a real worker
-    w.engine.request_analysis.disconnect()
+    for signal in (w.engine.request_move, w.engine.request_analysis, w.engine.request_restart):
+        signal.disconnect()  # keep the fake from reaching a real worker
     w.grab()  # paints board + bar once
 
     start = w.board.fen()
@@ -37,13 +32,7 @@ def test_game_loop_pauses_on_blunder_and_undo_retries():
     w.on_user_move(chess.Move.from_uci("f2f3"))
     w.on_analysed(w.board.fen(), PovScore(Cp(-400), chess.WHITE), None)
     assert w.pending_retry and "Error grave" in w.feedback.text()
+    assert "Precisión" in w.accuracy.text()
     w.undo()
     assert w.board.fen() == start and w.board_view.interactive and not w.pending_retry
     w.engine.shutdown()
-
-
-if __name__ == "__main__":
-    app = QApplication([])
-    test_evaluator()
-    test_game_loop_pauses_on_blunder_and_undo_retries()
-    print("OK")

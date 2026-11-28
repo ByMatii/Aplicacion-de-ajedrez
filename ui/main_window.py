@@ -1,12 +1,16 @@
-"""Game loop: user move -> analyse -> classify (maybe pause) -> bot move -> analyse -> user turn."""
+"""UI coordinator. Game state lives in core.board_manager; the engine runs in core.engine_service.
+
+Flow: user move -> analyse -> classify (maybe pause) -> bot move -> analyse -> user turn.
+"""
 import chess
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox,
+    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox,
     QPushButton, QVBoxLayout, QWidget,
 )
 
+from core.board_manager import BoardManager, PlyRecord
 from core.engine_service import LEVELS, EngineService
-from core.evaluator import BEST, BLUNDER, classify, cp_white, format_score
+from core.evaluator import BEST, BLUNDER, cp_white, format_score
 from ui.board_widget import BoardWidget
 from ui.eval_bar_widget import EvalBarWidget
 
@@ -15,17 +19,17 @@ class MainWindow(QMainWindow):
     def __init__(self, engine_path: str):
         super().__init__()
         self.setWindowTitle("Entrenador de Ajedrez")
-        self.board = chess.Board()
-        self.evals: dict[str, tuple] = {}  # fen -> (PovScore, best move)
-        self.notes: list[tuple[str, int | None]] = []  # per ply: (text for list, user's cp loss or None)
-        self.user_color = chess.WHITE
+        self.game = BoardManager()
+        self.board = self.game.board  # same object the board widget draws
         self.pending_retry = False
+        self.engine_ok = True
 
         self.engine = EngineService(engine_path)
         self.engine.worker.analysed.connect(self.on_analysed)
         self.engine.worker.bot_moved.connect(self.on_bot_moved)
         # bound methods, not lambdas: Qt queues them onto the UI thread; a lambda would run in the engine thread
         self.engine.worker.failed.connect(self.on_engine_failed)
+        self.engine.worker.restarted.connect(self.on_engine_restarted)
 
         self.board_view = BoardWidget(self.board)
         self.board_view.move_made.connect(self.on_user_move)
@@ -37,12 +41,14 @@ class MainWindow(QMainWindow):
         self.color.addItems(["Juego con blancas", "Juego con negras"])
         self.coach = QCheckBox("Entrenador: frenar ante errores graves")
         self.coach.setChecked(True)
-        new_btn, hint_btn, self.undo_btn, self.continue_btn = (
-            QPushButton(t) for t in ("Nueva partida", "Pista", "Deshacer", "Continuar"))
+        new_btn, hint_btn, self.undo_btn, self.continue_btn, save_btn, load_btn = (
+            QPushButton(t) for t in ("Nueva partida", "Pista", "Deshacer", "Continuar", "Guardar PGN", "Cargar PGN"))
         new_btn.clicked.connect(self.new_game)
         hint_btn.clicked.connect(self.show_hint)
         self.undo_btn.clicked.connect(self.undo)
         self.continue_btn.clicked.connect(self.continue_after_blunder)
+        save_btn.clicked.connect(self.save_game)
+        load_btn.clicked.connect(self.load_game)
         self.feedback = QLabel()
         self.feedback.setWordWrap(True)
         self.accuracy = QLabel()
@@ -50,7 +56,7 @@ class MainWindow(QMainWindow):
 
         side = QVBoxLayout()
         for w in (QLabel("Nivel del bot"), self.level, self.color, self.coach, new_btn, hint_btn,
-                  self.undo_btn, self.continue_btn, self.feedback, self.accuracy, self.moves):
+                  self.undo_btn, self.continue_btn, save_btn, load_btn, self.feedback, self.accuracy, self.moves):
             side.addWidget(w)
         row = QHBoxLayout()
         row.addWidget(self.eval_bar)
@@ -64,14 +70,17 @@ class MainWindow(QMainWindow):
 
     # flow ---------------------------------------------------------------------
     def new_game(self):
-        self.board.reset()
-        self.evals.clear()
-        self.notes.clear()
+        self.game.new_game(chess.WHITE if self.color.currentIndex() == 0 else chess.BLACK)
+        self._begin()
+
+    def _begin(self):
+        """Common start for a new or a loaded game: reset UI state, analyse the position."""
         self.pending_retry = False
-        self.user_color = chess.WHITE if self.color.currentIndex() == 0 else chess.BLACK
-        self.board_view.flipped = self.eval_bar.flipped = self.user_color == chess.BLACK
+        self.board_view.flipped = self.eval_bar.flipped = self.game.user_color == chess.BLACK
         self.feedback.setText("")
         self.refresh()
+        if not self.engine_ok:  # queued before the analysis, so the engine is back by then
+            self.engine.request_restart.emit()
         self.analyse_current()
 
     def analyse_current(self):
@@ -81,28 +90,20 @@ class MainWindow(QMainWindow):
     def on_analysed(self, fen, score, best):
         if fen != self.board.fen():
             return  # stale: board changed (undo/new game) while the engine was thinking
-        self.evals[fen] = (score, best)
+        judged = self.game.apply_eval(fen, score, best)
         self.eval_bar.set_eval(cp_white(score), format_score(score))
-        if self.board.move_stack and self.board.turn != self.user_color:
-            self.judge_user_move(score)
+        if judged and judged.is_user:
+            self.judge_user_move(judged)
         else:
             self.next_turn()
 
-    def judge_user_move(self, score_after):
-        move = self.board.peek()
-        before = self.board.copy()
-        before.pop()
-        score_before, best = self.evals[before.fen()]
-        label, loss = classify(cp_white(score_before), cp_white(score_after),
-                               self.user_color == chess.WHITE, move == best)
-        san = before.san(move)
-        self.notes[-1] = (f"{self._num(before)}{san}   — {label}", loss)
-        text = f"{san}: {label}"
-        if label != BEST and best:
-            text += f" (−{loss / 100:.1f}). Mejor era {before.san(best)}."
+    def judge_user_move(self, ply: PlyRecord):
+        text = f"{ply.san}: {ply.label}"
+        if ply.label != BEST and ply.best_move:
+            text += f" (−{ply.loss / 100:.1f}). Mejor era {chess.Board(ply.fen_before).san(ply.best_move)}."
         self.feedback.setText(text)
         self.refresh()
-        if label == BLUNDER and self.coach.isChecked():
+        if ply.label == BLUNDER and self.coach.isChecked():
             self.pending_retry = True
             self.feedback.setText(text + "\nPulsa Deshacer para reintentar o Continuar para seguir.")
             self.refresh()
@@ -110,28 +111,34 @@ class MainWindow(QMainWindow):
         self.next_turn()
 
     def next_turn(self):
-        if self.board.is_game_over():
-            outcome = self.board.outcome()
-            self.feedback.setText(f"{self.feedback.text()}\nFin: {self.board.result()} ({outcome.termination.name}).")
+        if self.game.is_over:
+            self.feedback.setText(f"{self.feedback.text()}\nFin: {self.game.result_text}.")
             self.board_view.interactive = False
             return
-        if self.board.turn == self.user_color:
+        if self.game.user_to_move:
             self.board_view.interactive = True
         else:
             self.engine.request_move.emit(self.board.fen(), self.level.currentText())
 
     def on_user_move(self, move):
-        self._push(move)
+        self.game.push(move)
+        self.refresh()
         self.analyse_current()
 
     def on_bot_moved(self, fen, move):
         if fen != self.board.fen():
             return
-        self._push(move)
+        self.game.push(move)
+        self.refresh()
         self.analyse_current()
 
     def on_engine_failed(self, msg):
+        self.engine_ok = False  # the next "Nueva partida" asks the worker to restart Stockfish
         QMessageBox.warning(self, "Motor", msg)
+
+    def on_engine_restarted(self):
+        self.engine_ok = True
+        self.statusBar().showMessage("Stockfish se reinició.", 5000)
 
     def continue_after_blunder(self):
         if self.pending_retry:
@@ -140,16 +147,12 @@ class MainWindow(QMainWindow):
             self.next_turn()
 
     def undo(self):
-        if not self.board.move_stack:
+        if not self.game.undo():
             return
-        self.board.pop()
-        if self.board.turn != self.user_color and self.board.move_stack:
-            self.board.pop()
-        del self.notes[len(self.board.move_stack):]
         self.pending_retry = False
         self.feedback.setText("Jugada deshecha. Prueba otra.")
         self.refresh()
-        cached = self.evals.get(self.board.fen())
+        cached = self.game.evals.get(self.board.fen())
         if cached:
             self.eval_bar.set_eval(cp_white(cached[0]), format_score(cached[0]))
             self.next_turn()
@@ -157,22 +160,42 @@ class MainWindow(QMainWindow):
             self.analyse_current()
 
     def show_hint(self):
-        cached = self.evals.get(self.board.fen())
-        if self.board.turn == self.user_color and cached and cached[1]:
+        cached = self.game.evals.get(self.board.fen())
+        if self.game.user_to_move and cached and cached[1]:
             self.board_view.arrows = [cached[1]]
             self.board_view.update()
 
-    # helpers ------------------------------------------------------------------
-    def _push(self, move):
-        san = self.board.san(move)
-        num = self._num(self.board)
-        self.board.push(move)
-        self.notes.append((f"{num}{san}", None))
-        self.refresh()
+    # save / load --------------------------------------------------------------
+    def save_game(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Guardar partida", "partida.pgn", "PGN (*.pgn)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.game.to_pgn(self.level.currentText()) + "\n")
+        except OSError as e:
+            QMessageBox.warning(self, "Guardar partida", f"No se pudo guardar: {e}")
 
+    def load_game(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Cargar partida", "", "PGN (*.pgn);;Todos los archivos (*)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                level = self.game.load_pgn(f.read())
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            QMessageBox.warning(self, "Cargar partida", f"No se pudo cargar: {e}")
+            return
+        if level in LEVELS:
+            self.level.setCurrentText(level)
+        self.color.setCurrentIndex(0 if self.game.user_color == chess.WHITE else 1)
+        self._begin()  # re-analyses the position; if it's the bot's turn it moves, so the game resumes
+
+    # helpers ------------------------------------------------------------------
     @staticmethod
-    def _num(board: chess.Board) -> str:
-        return f"{board.fullmove_number}. " if board.turn == chess.WHITE else f"{board.fullmove_number}... "
+    def _ply_text(ply: PlyRecord) -> str:
+        # only the user's moves show their label in the list
+        return f"{ply.numbered_san}   — {ply.label}" if ply.is_user and ply.label else ply.numbered_san
 
     def refresh(self):
         self.board_view.arrows = []
@@ -180,10 +203,16 @@ class MainWindow(QMainWindow):
         self.board_view.update()
         self.continue_btn.setEnabled(self.pending_retry)
         self.moves.clear()
-        self.moves.addItems([text for text, _ in self.notes])
+        self.moves.addItems([self._ply_text(p) for p in self.game.plies])
         self.moves.scrollToBottom()
-        losses = [loss for _, loss in self.notes if loss is not None]
-        self.accuracy.setText(f"ACPL (tu pérdida media): {sum(losses) / len(losses):.0f}" if losses else "")
+        me, bot = self.game.accuracy(self.game.user_color), self.game.accuracy(not self.game.user_color)
+        acpl = self.game.acpl(self.game.user_color)
+        lines = []
+        if me is not None:
+            lines.append(f"Precisión: tú {me:.0f} %" + (f" · bot {bot:.0f} %" if bot is not None else ""))
+        if acpl is not None:
+            lines.append(f"ACPL (tu pérdida media): {acpl:.0f}")
+        self.accuracy.setText("\n".join(lines))
 
     def closeEvent(self, event):
         self.engine.shutdown()
