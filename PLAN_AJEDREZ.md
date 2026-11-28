@@ -1,6 +1,6 @@
 # Entrenador de Ajedrez — Planificación y contexto del proyecto
 
-> **Para quien lea esto (otro chat / asistente):** este documento resume el proyecto, el estado actual (MVP hecho), las decisiones tomadas y el plan por etapas. Úsalo como contexto de partida. Idioma de la app y del código de cara al usuario: **español**. Última actualización: 27/11/2026.
+> **Para quien lea esto (otro chat / asistente):** este documento resume el proyecto, el estado actual (MVP hecho), las decisiones tomadas y el plan por etapas. Úsalo como contexto de partida. Idioma de la app y del código de cara al usuario: **español**. Última actualización: 28/11/2026.
 
 ---
 
@@ -150,7 +150,7 @@ Campos opcionales recomendados para ambos: `prerrequisitos` (ids), `jugadas_vali
 
 ## 6. Plan por etapas
 
-### Etapa 1 — Consolidación y calidad del núcleo ✅
+### Etapa 1 — Consolidación y calidad del núcleo ✅ (cerrada el 28/11/2026: 20 tests pasan)
 Objetivo: base sólida antes de sumar funciones.
 
 1. ✅ Extraer `core/board_manager.py` (estado, historial, deshacer, resultado). `MainWindow` delega el estado; el armado de la interfaz que le queda se extrae en la Etapa 2 (ítem 9).
@@ -280,6 +280,6 @@ Objetivo: base sólida antes de sumar funciones.
 
 ## 9. Próximos pasos inmediatos
 
-1. **Etapa 3** (gráfico de evolución de la ventaja + revisión guiada): reutiliza `PlyRecord`; incluir ahí el reanálisis de partidas cargadas (ítem 8).
+1. **Etapa 3 (siguiente)** (gráfico de evolución de la ventaja + revisión guiada): reutiliza `PlyRecord`; incluir ahí el reanálisis de partidas cargadas (ítem 8).
 2. Definir y fijar el esquema JSON final de lecciones/puzzles (§5.1) antes de la Etapa 4, y crear 2–3 ejemplos reales (un puzzle y una lección con PGN) para probar `puzzle_loader.py`.
 3. Etapa 2 cuando toque pulir la interfaz: incluye extraer el armado de `MainWindow` (ítem 9).
